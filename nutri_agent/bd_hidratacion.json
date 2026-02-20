@@ -1,0 +1,20 @@
+{
+  "usuarios": {
+    "19901814954": {
+      "nombre": "Estuardo"
+    },
+    "199018123": {
+      "nombre": "Mario"
+    }
+  },
+  "registros": {
+    "19901814954": {
+      "2026-02-20": {
+        "agua_ml": 1800,
+        "actividad": "ejercicio",
+        "ultima_hora": 12
+      }
+    },
+    "199018123": {}
+  }
+}
