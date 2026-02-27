@@ -3,9 +3,13 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass
-from datetime import date
-from typing import Dict, List, Optional
+from datetime import date, datetime
+from typing import Dict, List, Optional, Tuple
+
+import serial
+from serial.tools import list_ports
 
 
 # =========================
@@ -28,6 +32,15 @@ def guardar_json(ruta: str, datos: dict) -> None:
 
 
 # =========================
+# Serial (Arduino)
+# =========================
+
+def listar_puertos_serial() -> List[Tuple[str, str]]:
+    puertos = list(list_ports.comports())
+    return [(p.device, p.description) for p in puertos]
+
+
+# =========================
 # Modelos
 # =========================
 
@@ -47,16 +60,10 @@ class AgenteHidratacion:
     def __init__(self, ruta_bd: str = "bd_hidratacion.json"):
         self.ruta_bd = ruta_bd
         self.bd = self._cargar_bd()
-
-        self.carnet_activo: Optional[str] = None  # “sesión” actual
+        self.carnet_activo: Optional[str] = None  # sesión actual
 
     def _cargar_bd(self) -> dict:
         bd = cargar_json(self.ruta_bd)
-        # Estructura esperada:
-        # {
-        #   "usuarios": { "carnet": {"nombre": "..."} },
-        #   "registros": { "carnet": { "YYYY-MM-DD": {"agua_ml": 0, "actividad":"normal"} } }
-        # }
         if "usuarios" not in bd:
             bd["usuarios"] = {}
         if "registros" not in bd:
@@ -79,10 +86,8 @@ class AgenteHidratacion:
             {"1": "sedentario", "2": "normal", "3": "ejercicio"}
         )
 
-        # Agua a ingresar en esta operación (se suma al total del día)
         agua_a_sumar = self._pedir_int("Agua a registrar en ml (por ejemplo 250): ", minimo=0, maximo=10000)
 
-        # Traer lo que ya hay hoy para acumular
         total_hoy_actual = self._obtener_agua_hoy(self.carnet_activo, hoy)
         total_nuevo = total_hoy_actual + agua_a_sumar
 
@@ -95,7 +100,6 @@ class AgenteHidratacion:
 
     # -------- Decisión inteligente --------
     def calcular_meta_agua_ml(self, actividad: str) -> int:
-        # Meta simple y fácil de explicar
         base = 2000
         extra = 0
         if actividad == "sedentario":
@@ -113,7 +117,6 @@ class AgenteHidratacion:
             return "BAJA"
         if faltante <= 700:
             return "MEDIA"
-        # Si es tarde y falta mucho, se vuelve más urgente
         if hora >= 19:
             return "ALTA"
         return "ALTA"
@@ -143,7 +146,6 @@ class AgenteHidratacion:
         return texto
 
     def plan_simple(self, hora: int, faltante: int) -> List[str]:
-        # Plan sencillo, solo texto
         if faltante <= 0:
             return []
 
@@ -157,7 +159,6 @@ class AgenteHidratacion:
                 lineas.append(f"- En 45 minutos: {min(250, restante)} ml")
             return lineas
 
-        # Si aún hay tiempo, repartir en 3 tomas como máximo
         tomas = 2
         if faltante > 900:
             tomas = 3
@@ -192,12 +193,16 @@ class AgenteHidratacion:
             print("\n==============================")
             print("AGENTE: COACH DE HIDRATACION")
             print("==============================")
+            print("Usuario activo:", self._usuario_activo_texto())
+            print("------------------------------")
             print("1) Iniciar sesion / Elegir usuario")
-            print("2) Registrar agua (usuario activo)")
+            print("2) Registrar agua manual (usuario activo)")
             print("3) Ver resumen de hoy (usuario activo)")
             print("4) Ver historial (usuario activo)")
-            print("5) Cambiar usuario")
-            print("6) Salir")
+            print("5) Configurar ml por boton (usuario activo)")
+            print("6) Modo Arduino (usuario activo)")
+            print("7) Cambiar usuario")
+            print("8) Salir")
             opcion = input("Elige una opcion: ").strip()
 
             if opcion == "1":
@@ -212,8 +217,12 @@ class AgenteHidratacion:
                 self._requerir_usuario_activo()
                 self.op_historial()
             elif opcion == "5":
-                self.iniciar_o_elegir_usuario()
+                self.op_configurar_ml_por_boton()
             elif opcion == "6":
+                self.op_modo_arduino()
+            elif opcion == "7":
+                self.iniciar_o_elegir_usuario()
+            elif opcion == "8":
                 print("Saliendo...")
                 break
             else:
@@ -233,13 +242,21 @@ class AgenteHidratacion:
                 print("Nombre vacio. No se creo el usuario.")
                 return
 
-            self.bd["usuarios"][carnet] = {"nombre": nombre}
+            ml_por_boton = self._pedir_int("Configura ml por boton (ej. 250): ", minimo=1, maximo=2000)
+
+            self.bd["usuarios"][carnet] = {"nombre": nombre, "ml_por_boton": ml_por_boton}
             self.bd["registros"].setdefault(carnet, {})
             self._guardar_bd()
             print("Usuario creado.")
+        else:
+            # Si es viejo y no tiene ml_por_boton, se lo ponemos
+            if "ml_por_boton" not in self.bd["usuarios"][carnet]:
+                self.bd["usuarios"][carnet]["ml_por_boton"] = 250
+                self._guardar_bd()
 
         self.carnet_activo = carnet
         print(f"Usuario activo: {self.bd['usuarios'][carnet]['nombre']} ({carnet})")
+        print(f"ml por boton: {self.bd['usuarios'][carnet]['ml_por_boton']}")
 
     def op_registrar_agua(self) -> None:
         entrada = self.leer_entrada_del_dia()
@@ -250,10 +267,8 @@ class AgenteHidratacion:
         recomendacion = self.construir_recomendacion(meta, entrada.agua_ml, faltante, entrada.hora, prioridad)
         plan = self.plan_simple(entrada.hora, faltante)
 
-        # Actuar: guardar registro
         self.registrar_dia(entrada)
 
-        # Actuar: mostrar reporte
         print("\n--- Resultado ---")
         print(recomendacion)
         if plan:
@@ -274,7 +289,7 @@ class AgenteHidratacion:
 
         if not reg:
             print("Aun no hay registro de hoy.")
-            print("Usa la opcion 2 para registrar agua.")
+            print("Usa la opcion 2 para registrar agua manual o la opcion 6 para Arduino.")
             return
 
         actividad = reg["actividad"]
@@ -300,7 +315,6 @@ class AgenteHidratacion:
             print("No hay registros aun.")
             return
 
-        # Ordenar por fecha
         fechas = sorted(registros.keys())
         print("Fecha        | Agua(ml) | Actividad")
         print("------------------------------------")
@@ -308,9 +322,110 @@ class AgenteHidratacion:
             r = registros[f]
             print(f"{f} | {str(r['agua_ml']).rjust(7)} | {r['actividad']}")
 
+    def op_configurar_ml_por_boton(self) -> None:
+        self._requerir_usuario_activo()
+        carnet = self.carnet_activo
+
+        actual = int(self.bd["usuarios"][carnet].get("ml_por_boton", 250))
+        print("\n--- Configuracion ml por boton ---")
+        print(f"Valor actual: {actual} ml")
+
+        nuevo = self._pedir_int("Nuevo valor (ml): ", minimo=1, maximo=2000)
+        self.bd["usuarios"][carnet]["ml_por_boton"] = nuevo
+        self._guardar_bd()
+
+        print("Configuracion guardada.")
+
+    def op_modo_arduino(self) -> None:
+        self._requerir_usuario_activo()
+
+        puertos = listar_puertos_serial()
+        if not puertos:
+            print("\nNo se detectaron puertos seriales.")
+            print("Conecta el Arduino por USB y vuelve a intentar.")
+            return
+
+        print("\n--- Puertos disponibles ---")
+        for i, (dev, desc) in enumerate(puertos, start=1):
+            print(f"{i}) {dev} - {desc}")
+
+        idx = self._pedir_int("Elige el numero de puerto: ", minimo=1, maximo=len(puertos))
+        puerto = puertos[idx - 1][0]
+
+        baud = 9600
+        carnet = self.carnet_activo
+        ml_por_boton = int(self.bd["usuarios"][carnet].get("ml_por_boton", 250))
+
+        print("\n--- Modo Arduino activo ---")
+        print("Presiona el boton para registrar agua.")
+        print("Para salir de este modo: presiona Ctrl + C.\n")
+
+        try:
+            with serial.Serial(puerto, baud, timeout=0.2) as ser:
+                time.sleep(1.5)
+
+                while True:
+                    linea = ser.readline().decode("utf-8", errors="ignore").strip()
+                    if not linea:
+                        continue
+
+                    if linea == "PULSE":
+                        self._registrar_desde_arduino(ml_por_boton)
+                    else:
+                        # Si quieres ver lo que manda Arduino, descomenta:
+                        # print("Serial:", linea)
+                        pass
+
+        except KeyboardInterrupt:
+            print("\nSaliendo del modo Arduino...")
+        except Exception as e:
+            print(f"\nError en modo Arduino: {e}")
+
+    def _registrar_desde_arduino(self, ml_por_boton: int) -> None:
+        carnet = self.carnet_activo
+        hoy = date.today().isoformat()
+        hora = int(datetime.now().hour)
+
+        # Si hoy no existe registro, se crea con actividad "normal"
+        actividad = self._actividad_hoy(carnet, hoy)
+
+        agua_actual = self._obtener_agua_hoy(carnet, hoy)
+        agua_nueva = agua_actual + ml_por_boton
+
+        entrada = EntradaDelDia(
+            fecha=hoy,
+            hora=hora,
+            agua_ml=agua_nueva,
+            actividad=actividad
+        )
+
+        self.registrar_dia(entrada)
+
+        meta = self.calcular_meta_agua_ml(actividad)
+        faltante = meta - agua_nueva
+        prioridad = self.calcular_prioridad(hora, faltante)
+        recomendacion = self.construir_recomendacion(meta, agua_nueva, faltante, hora, prioridad)
+
+        print("\nRegistro recibido desde Arduino.")
+        print(f"Se sumaron {ml_por_boton} ml.")
+        print(recomendacion)
+
     # =========================
     # Helpers
     # =========================
+
+    def _usuario_activo_texto(self) -> str:
+        if not self.carnet_activo:
+            return "Ninguno"
+        u = self.bd["usuarios"].get(self.carnet_activo, {})
+        nombre = u.get("nombre", "Desconocido")
+        return f"{nombre} ({self.carnet_activo})"
+
+    def _actividad_hoy(self, carnet: str, hoy: str) -> str:
+        reg = self.bd["registros"].get(carnet, {}).get(hoy)
+        if reg and "actividad" in reg:
+            return reg["actividad"]
+        return "normal"
 
     def _obtener_agua_hoy(self, carnet: str, hoy: str) -> int:
         reg = self.bd["registros"].get(carnet, {}).get(hoy)

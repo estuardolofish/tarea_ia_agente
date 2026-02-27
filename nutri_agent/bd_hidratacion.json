@@ -1,7 +1,8 @@
 {
   "usuarios": {
     "19901814954": {
-      "nombre": "Estuardo"
+      "nombre": "Estuardo",
+      "ml_por_boton": 250
     },
     "199018123": {
       "nombre": "Mario"
@@ -12,6 +13,11 @@
       "2026-02-20": {
         "agua_ml": 1800,
         "actividad": "ejercicio",
+        "ultima_hora": 12
+      },
+      "2026-02-27": {
+        "agua_ml": 2000,
+        "actividad": "normal",
         "ultima_hora": 12
       }
     },
